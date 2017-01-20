@@ -1,0 +1,86 @@
+﻿#pragma kernel MoveParticles
+
+struct Particle
+{
+	float3 position;
+	float3 velocity;
+};
+RWStructuredBuffer<Particle> particleBuffer;
+RWStructuredBuffer<float3> vertexBuffer;
+RWStructuredBuffer<int> triangleBuffer;
+
+
+float springConstant;
+float dampingCoefficient;
+
+RWStructuredBuffer<float3> testBuffer;
+
+float4 m0;
+float4 m1;
+float4 m2;
+float4 m3;
+
+float deltaTime;
+float lerpValue;
+float maxDist;
+float maxOrbitForce;
+float maxIFVelocity;
+float velScale;
+float mixRatio;
+
+float IFVelocity;
+float3 IFPosition;
+
+
+
+
+// simply returns a zero vector, instead of freaking out
+float3 norm(float3 vec) {
+	float len = length(vec);
+	float3 norm = (len == 0.0) ? vec : vec/len;
+	return norm;
+}
+
+[numthreads(32,1,1)]
+void MoveParticles (uint3 id : SV_DispatchThreadID)
+{
+//	float4x4 m = objectMatrix[0].mat;
+//	m[0] = float4(1,1,1,1);
+	float4x4 m = float4x4(
+		1, 0, 0, 0,
+		0, 1, 0, 0,
+		0, 0, 1, 0,
+		0, 0, 0, 1
+	);
+	m[0] = m0;
+	m[1] = m1;
+	m[2] = m2;
+	m[3] = m3;
+	
+	int indexA = 3 * id.x;
+	int indexB = 3 * id.x + 1;
+	int indexC = 3 * id.x + 2;
+	
+	float3 currentPos = particleBuffer[indexA].position;
+	float3 worldPos = mul(m, float4(vertexBuffer[indexA],1)).xyz;
+	
+	float3 springForce = springConstant * (worldPos - currentPos).xyz - dampingCoefficient * particleBuffer[indexA].velocity;// + (currentPos - IFPosition) * length(IFVelocity) * 10 * lerpValue;
+	float3 orbitForce = lerpValue * norm(IFPosition - currentPos) / max(pow(length(IFPosition - currentPos), 2), maxOrbitForce);
+
+	float velRatio = IFVelocity / mixRatio;
+	float3 force = velRatio* orbitForce + max(0, (1 - velRatio)) * springForce;
+
+	
+	particleBuffer[indexA].velocity += force * deltaTime;
+	
+    particleBuffer[indexA].position += particleBuffer[indexA].velocity * deltaTime;
+    
+    float dist = length(particleBuffer[indexA].position - IFPosition);
+    if(dist > maxDist) {
+    	particleBuffer[indexA].position = normalize(particleBuffer[indexA].position - IFPosition) * maxDist + IFPosition;
+    }
+
+    particleBuffer[indexB].position = (mul(m, float4(vertexBuffer[indexB],1)).xyz - worldPos) * (1.01 + IFVelocity * velScale) + particleBuffer[indexA].position;
+    particleBuffer[indexC].position = (mul(m, float4(vertexBuffer[indexC],1)).xyz - worldPos) * (1.01 + IFVelocity * velScale) + particleBuffer[indexA].position;
+
+}

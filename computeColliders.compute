@@ -1,0 +1,179 @@
+﻿// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+#pragma kernel RayCast
+
+// These particles are just for testing
+struct Particle
+{
+	float3 position;
+	float3 velocity;
+	float dist;
+	float temp;
+};
+RWStructuredBuffer<Particle> particleBuffer;
+
+struct Triangle
+{
+	int a;
+	int b;
+	int c;
+};
+StructuredBuffer<Triangle> triangles;
+
+struct InputParticle
+{
+	float3 position;
+	float3 velocity;
+};
+StructuredBuffer<InputParticle> inputParticles;
+
+struct InterestingTriangle
+{
+	float3 position;
+	float3 velocity;
+	float3 normal;
+};
+RWStructuredBuffer<int> closestIndexes;
+RWStructuredBuffer<int> collisionData;
+RWStructuredBuffer<float3> closestVerts;
+
+
+// What we're outputting to
+struct Output
+{
+	float3 velocityChange;
+	int intersectionCount;
+};
+RWStructuredBuffer<Output> velocityChanges;
+
+// Our inner friend
+float3 Origin;
+float3 Direction;
+
+// Our mesh
+RWStructuredBuffer<float3> Vertices;
+RWStructuredBuffer<float3> LastFrameVertices;
+
+float deltaTime; // Time for computations
+float objectNum; // Time for computations
+int objectNum2;
+int passNumber;
+
+// For the second kernel, the intersected vertex index
+RWStructuredBuffer<int> intersectionIndex;
+RWStructuredBuffer<int> intersectionTriangleIndex;
+RWStructuredBuffer<float3> intersectionPoint;
+RWStructuredBuffer<int> intersectionNumber;
+
+RWStructuredBuffer<int> minimumDist;
+
+[numthreads(32,1,1)] // A one-dimensional, 32 thread warp, something-something 32 threads are best, just shutup already
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+	// Clear the test particle buffer
+//	particleBuffer[id.x].position = float3(0,0,0);
+	float3 position = inputParticles[id.y + (8 * objectNum)].position;
+	float3 velocity = inputParticles[id.y + (8 * objectNum)].velocity;
+	float objectRef = (16 * objectNum);
+	
+	// Where the vertices are now on this triangle
+	float3 vertA = Vertices[triangles[id.x].a];
+	float3 vertB = Vertices[triangles[id.x].b];
+	float3 vertC = Vertices[triangles[id.x].c];
+	
+	// Where they were last frame
+	float3 lastVertA = LastFrameVertices[triangles[id.x].a];
+	float3 lastVertB = LastFrameVertices[triangles[id.x].b];
+	float3 lastVertC = LastFrameVertices[triangles[id.x].c];
+	
+	// The velocity of the triangle
+	float3 triangleVelocity = (vertA + vertB + vertC)/3 - (lastVertA + lastVertB + lastVertC)/3;
+	particleBuffer[id.x].position = (vertA + vertB + vertC)/3;
+	
+	// Compute normal of the triangle
+	float3 norm = normalize(cross(vertB - vertA, vertC - vertA));
+	
+//	 This is the per-frame velocity of the inner friend, relative to this triangle
+	float3 realVel = velocity * deltaTime - triangleVelocity;
+	
+	// Find the intersection of the vector and plane
+	float k = dot(vertA - position, norm) / dot(realVel, norm); // The number of frames till IF reaches the plane the triangle is on
+	float3 I = position + k*realVel; // The intersection Point
+	
+	// Convert to barycentric coordinates
+	float triangleArea = dot(norm, cross(vertB - vertA,vertC - vertA));
+	float areaIBC = dot(norm, cross(vertB - I, vertC - I));
+	float baryA = areaIBC / triangleArea;
+	float areaICA = dot(norm, cross(vertC - I, vertA - I));
+	float baryB = areaICA / triangleArea;
+	float baryC = 1 - baryA - baryB;
+
+	// IF will collide with this triangle 
+	if(baryA > 0 && baryB > 0 && baryC > 0 && k >= 0) {
+		InterlockedMin(minimumDist[id.y + (8 * objectNum)], (int)k);
+		if((int)k == minimumDist[id.y + (8 * objectNum)]) {
+		//	closestIndexes[id.y] = id.x;	
+			collisionData[id.y + objectRef] = id.x;
+		}
+	}
+	
+	// Brute force raycast, repeat the above, ignoring the velocity of the mesh
+	// Not very DRY
+	velocity = velocity + (1 , 1, 1);
+	k = dot(vertA - position, norm) / dot(velocity, norm); 
+	I = position + k*velocity; 
+	// Convert to barycentric coordinates;
+	areaIBC = dot(norm, cross(vertB - I, vertC - I));
+	baryA = areaIBC / triangleArea;
+	areaICA = dot(norm, cross(vertC - I, vertA - I));
+	baryB = areaICA / triangleArea;
+	baryC = 1 - baryA - baryB;	
+	
+	
+	if(baryA > 0 && baryB > 0 && baryC > 0 && k >= 0) {
+		// Need to use this method to avoid race conditions
+		InterlockedAdd(collisionData[id.y + 8 + objectRef], 1);
+	}
+}
+
+[numthreads(32,1,1)] // Our very creatively named second kernel, this one just does a simple raycast
+void RayCast (uint3 id : SV_DispatchThreadID)
+{
+	// Where the vertices are now on this triangle
+	float3 vertA = Vertices[triangles[id.x].a];
+	float3 vertB = Vertices[triangles[id.x].b];
+	float3 vertC = Vertices[triangles[id.x].c];
+	
+	
+	float3 position = Origin;
+	float3 velocity = Direction;
+	int objectRef = objectNum2;
+	
+	float3 norm = normalize(cross(vertB - vertA, vertC - vertA));
+	
+	float k = dot(vertA - position, norm) / dot(velocity, norm); 
+	float3 I = position + k*velocity; 
+	// Convert to barycentric coordinates;
+	float triangleArea = dot(norm, cross(vertB - vertA,vertC - vertA));
+	float areaIBC = dot(norm, cross(vertB - I, vertC - I));
+	float baryA = areaIBC / triangleArea;
+	float areaICA = dot(norm, cross(vertC - I, vertA - I));
+	float baryB = areaICA / triangleArea;
+	float baryC = 1 - baryA - baryB;	
+	
+	
+ 
+	if(baryA > 0 && baryB > 0 && baryC > 0 && k >= 0) {
+		
+		//particleBuffer[id.x].position = I; // Collision point
+		int idx;
+		InterlockedAdd(intersectionNumber[0], 1, idx);
+		//collisionData[32] = triangles[id.x].a;
+		collisionData[objectRef + idx] = triangles[id.x].a;
+		intersectionIndex[idx] = triangles[id.x].a;
+		intersectionTriangleIndex[idx] = id.x;
+		intersectionPoint[idx] = I;
+		
+		// The index of the first vertex of the intersected triangle
+	}
+}

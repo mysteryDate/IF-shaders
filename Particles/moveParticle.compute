@@ -1,0 +1,94 @@
+#pragma kernel main
+
+// The same particle data structure used by both the compute shader and the shader.
+struct Particle
+{
+	float3 position;
+	float3 velocity;
+//	float3 temp1;
+//	float3 temp2;
+	int closestVertexIndex;
+	float temp;
+//	float temp2;
+};
+
+struct avatarMeshPoint
+{
+	float3 vertex;
+	float distance;
+	int closestParticleIndex;
+	float3 normal;
+//	int triangles[16];
+//	int triangleCount;
+};
+
+// The buffer holding the particles shared with the regular shader.
+RWStructuredBuffer<Particle> particleBuffer;
+
+RWStructuredBuffer<avatarMeshPoint> avatarMesh; 
+
+// parameters from GPU
+float deltaTime;									// Even here deltaTime is needed!
+float3 target;										// Mouse position.
+float3 otherTarget;
+float3 otherTarget2;
+float targetStrengh;
+int numVerts;
+//float Mm;									// Mass of the mouse
+//float Pm;									// Mass of the particles
+
+[numthreads(32,1,1)] 								// 32 is the minimal size to fullfill the wrap. this is just the number of thread to run by wrap, "x, y, z" make easy 3D indexing.
+void main (uint3 id : SV_DispatchThreadID)
+{
+	// particleBuffer[id.x] is the particle this thread must Update, according to the thread ID.
+	otherTarget = avatarMesh[id.x].vertex;
+//	otherTarget = float3(0,0,0);
+
+	// Direction and distance to target.
+	float3 dir = normalize(otherTarget - particleBuffer[id.x].position);
+	//float dist = distance(target, particleBuffer[id.x].position);
+	float dist = distance(otherTarget, particleBuffer[id.x].position);
+	avatarMesh[id.x].distance = dist;
+	//float3 force = pow(dist, -2) * dir * Mm * Pm;
+	//float3 acceleration = force / Mm;
+	float friction = 0.02;
+	float minDist = 1000000;
+	float d2 = 0;
+	
+		// Compute velocity and position of this particle.
+	particleBuffer[id.x].velocity +=  friction * targetStrengh * dir * deltaTime * (dist + 1);
+//	if(dist < 1) {
+//		particleBuffer[id.x].velocity *= 0;
+//		particleBuffer[id.x].position = otherTarget.xyz;
+//	}
+//	else {
+		//particleBuffer[id.x].velocity += acceleration * deltaTime;
+		particleBuffer[id.x].position +=  particleBuffer[id.x].velocity * deltaTime;
+	//	particleBuffer[id.x].position = target.xyz;
+//	}
+	
+	for(int i = 0; i < numVerts; i++) {
+		d2 = distance(avatarMesh[i].vertex, particleBuffer[id.x].position);
+		if(d2 < minDist) {
+			minDist = d2;
+//			avatarMesh[id.x].closestParticleIndex = i;
+			particleBuffer[id.x].closestVertexIndex = i;
+//			particleBuffer[id.x].position += normalize(avatarMesh[i].vertex - particleBuffer[id.x].position) * 0.01;
+			
+		}
+	}
+	
+	if(minDist < 1) {
+//		float3 collideNormal = normalize(avatarMesh[particleBuffer[id.x].closestVertexIndex].normal);
+//		float3 velocity = particleBuffer[id.x].velocity;
+//		particleBuffer[id.x].velocity = 2*dot(velocity, collideNormal)*collideNormal - velocity;
+		particleBuffer[id.x].velocity = 0;
+//		particleBuffer[id.x].velocity = collideNormal*100;
+//		particleBuffer[id.x].position = avatarMesh[particleBuffer[id.x].closestVertexIndex].vertex;
+	}
+	
+//	particleBuffer[id.x].position += normalize(avatarMesh[particleBuffer[id.x].closestVertexIndex].vertex - particleBuffer[id.x].position) * 0.01;
+
+}
+
+

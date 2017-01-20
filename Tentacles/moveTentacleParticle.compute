@@ -1,0 +1,117 @@
+#pragma kernel CSMain 
+#pragma kernel MoveTopParticles
+#pragma kernel ResolveConstraints
+
+// The same particle data structure used by both the compute shader and the shader.
+struct Particle
+{
+	float3 position;
+	float3 velocity;
+};
+
+int strandLength;
+float s; 					// The equilibrium spacing between particles
+float k;					// Spring tension
+float d; 					// Damping
+float ld; 					// Linear Damping
+float m; 					// Particle mass
+float h; 					// Delta time
+float3 G; 					// Gravity
+float maxDisp; 				// Maximum Displacement
+float time;
+float phase;
+float frequency;
+
+// current displacement of the spring based on positions X and Y
+#define spring_disp(X, Y) (X - Y + normalize(Y - X) * s) 								
+// change in position = velocity, or: dx = v
+#define dx(V) (V) 																		
+
+
+// simply returns a zero vector, instead of freaking out
+float3 norm(float3 vec) {
+	float len = length(vec);
+	float3 norm = (len == 0.0) ? vec : vec/len;
+	return norm;
+}
+
+// The acceleration on a particle given it's position, velocity and the position of the two neighboring particles
+float3 dv(float3 X, float3 P, float3 N, float3 V) {
+	
+	float3 d1 = spring_disp(X, P);
+	float3 d2 = spring_disp(X, N);
+	float3 spring_force = -k/m*(d1 + d2);
+	float3 damping_velocity = dot(V, norm(d1)) * norm(d1) + dot(V, norm(d2)) * norm(d2);
+	float3 damping_force = -d/m * damping_velocity - ld * V;
+	return spring_force + damping_force + G;
+}
+
+RWStructuredBuffer<Particle> particleBuffer; // particles at the beginning of the frame
+RWStructuredBuffer<Particle> k1; 			 // partial derivative buffers
+RWStructuredBuffer<Particle> k2;
+RWStructuredBuffer<Particle> k3; 												
+RWStructuredBuffer<Particle> k4;
+
+RWStructuredBuffer<float> randomLengths;	// For randomizing tenticle lengths
+
+[numthreads(1,32,1)] 				// Copy over data at beginning of frame, initialze partial buffers			
+void CSMain (uint3 id : SV_DispatchThreadID) {
+	
+	int index = id.x + 1 + strandLength * id.y;
+	
+	float3 X0 = particleBuffer[index].position;
+	float3 V0 = particleBuffer[index].velocity;
+	float3 P0 = particleBuffer[index - 1].position;
+	int nextIdx = index + 1;
+	float3 N0 = particleBuffer[index + 1].position;
+	
+	// For accounting for final particle in strand
+	if( (float)(index + 1) % float(strandLength) == 0) {
+		N0 = X0 + norm(X0 - P0) * s;
+		nextIdx = index;
+	}
+
+	k1[index].position = dx(V0);
+	k1[index].velocity = dv(X0, P0, N0, V0);
+
+	k2[index].position = dx(V0 + k1[index].velocity * h / 2);
+	k2[index].velocity = dv(X0 + k1[index].position * h / 2, P0 + k1[index - 1].position * h / 2, N0 + k1[nextIdx].position * h / 2, V0 + k1[index].velocity * h / 2);
+	
+	k3[index].position = dx(V0 + k2[index].velocity * h / 2);
+	k3[index].velocity = dv(X0 + k2[index].position * h / 2, P0 + k2[index - 1].position * h / 2, N0 + k2[nextIdx].position * h / 2, V0 + k2[index].velocity * h / 2);
+	
+	k4[index].position = dx(V0 + k3[index].velocity * h);
+	k4[index].velocity = dv(X0 + k3[index].position * h, P0 + k3[index - 1].position * h, N0 + k3[nextIdx].position * h, V0 + k3[index].velocity * h);
+	
+	particleBuffer[index].position += ( k1[index].position + 2*k2[index].position + 2*k3[index].position + k4[index].position ) * h/6; //TODO maybe optimize by caching variables?
+	particleBuffer[index].velocity += ( k1[index].velocity + 2*k2[index].velocity + 2*k3[index].velocity + k4[index].velocity ) * h/6;
+	
+}
+
+// Moving top particles in strand that are attached to the jellyfish
+float3 target;
+RWStructuredBuffer<float3> offsetBuffer;
+[numthreads(1,32,1)] 				
+void MoveTopParticles(uint3 id : SV_DispatchThreadID) {
+
+	float3 prevPos = particleBuffer[strandLength * id.y].position;
+	float3 nextPos = offsetBuffer[id.y];
+	particleBuffer[strandLength * id.y].velocity = prevPos - nextPos;
+	particleBuffer[strandLength * id.y].position = nextPos;
+}
+
+// For constraining the displacement between particles
+[numthreads(1,32,1)]
+void ResolveConstraints(uint3 id : SV_DispatchThreadID) {
+
+	int strandIndex = strandLength * id.y + 1;
+	for (int i = 0; i < strandLength - 1; i++) {
+		int index = strandIndex + i;
+		// Particle is beyond constrained distance
+		if( distance(particleBuffer[index].position, particleBuffer[index - 1].position) > maxDisp * s * randomLengths[id.y]) {
+			float3 dir = norm(particleBuffer[index].position - particleBuffer[index - 1].position);
+			particleBuffer[index].position = particleBuffer[index - 1].position + dir * maxDisp * s * randomLengths[id.y];
+			particleBuffer[index].velocity -= dot(particleBuffer[index].velocity, dir) * dir;
+		}
+	}
+}
